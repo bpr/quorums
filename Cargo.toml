@@ -1,0 +1,22 @@
+[workspace]
+members = [".", "quorums-build"]
+resolver = "2"
+
+[package]
+name = "quorums"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tonic = "0.13"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+futures = "0.3"
+dashmap = "6"
+bytes = "1"
+
+[build-dependencies]
+tonic-build = "0.13"
+quorums-build = { path = "quorums-build" }

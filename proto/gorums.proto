@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package gorums;
+
+// The single bidirectional stream that all call types share.
+// Every quorum call, RPC, unicast, and multicast is sent as a Message
+// on this stream, multiplexed by sequence number and method name.
+service Gorums {
+    rpc NodeStream(stream Message) returns (stream Message);
+}
+
+// Message is the wire envelope wrapping every application-level message.
+message Message {
+    // Sequence number assigned by the sender.  Client-initiated IDs have the
+    // high bit clear; server-initiated (back-channel) IDs have it set.
+    uint64 message_seq_no = 1;
+
+    // Fully-qualified RPC method name, e.g. "/storage.Storage/ReadQC".
+    string method = 2;
+
+    // gRPC status code + message for error responses (0 = OK).
+    uint32 status_code    = 3;
+    string status_message = 4;
+
+    // Serialised application proto message (prost-encoded).
+    bytes payload = 5;
+
+    // Per-call key/value metadata (e.g. auth tokens, trace IDs).
+    // Forwarded from client to server in-band with every Message.
+    map<string, string> metadata = 6;
+}
+
+// Used internally by the gorums health checker.
+message HealthCheckRequest {}
+message HealthCheckResponse { bool ok = 1; }
