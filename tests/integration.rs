@@ -14,6 +14,8 @@ use tonic::Status;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use futures::StreamExt as _;
+
 use quorums::{
     CallInfo, CancellationToken, Error as QError, HealthConfig, HealthStatus, Manager, NodeStatus,
     Server, ServerCallInfo, ServerCtx,
@@ -342,7 +344,7 @@ async fn test_correctable_majority() {
             .await
             .expect("correctable dispatch 2");
     let mut total = 0usize;
-    while let Ok(Some(nr)) = c.next().await {
+    while let Some(Ok(nr)) = c.next().await {
         assert!(nr.result.is_ok());
         total += 1;
     }
@@ -1913,9 +1915,9 @@ async fn test_correctable_next_drains_to_none() {
     let mut count = 0usize;
     loop {
         match c.next().await {
-            Ok(Some(_)) => count += 1,
-            Ok(None) => break,
-            Err(e) => panic!("unexpected error from next(): {e:?}"),
+            Some(Ok(_)) => count += 1,
+            None => break,
+            Some(Err(e)) => panic!("unexpected error from next(): {e:?}"),
         }
     }
     assert_eq!(count, 2, "expected 2 responses from 1 node");
@@ -1969,7 +1971,7 @@ async fn test_correctable_next_cancelled() {
 
     let result = c.next().await;
     assert!(
-        matches!(result, Err(QError::Cancelled)),
+        matches!(result, Some(Err(QError::Cancelled))),
         "expected Cancelled from next(), got {result:?}"
     );
 }
@@ -1995,7 +1997,7 @@ async fn test_correctable_next_already_cancelled() {
 
     let result = c.next().await;
     assert!(
-        matches!(result, Err(QError::Cancelled)),
+        matches!(result, Some(Err(QError::Cancelled))),
         "expected Cancelled, got {result:?}"
     );
 }

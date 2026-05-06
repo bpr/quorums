@@ -1,5 +1,8 @@
 use std::collections::HashSet;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
+use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -9,9 +12,27 @@ use crate::responses::NodeResponse;
 /// Handle returned by [`correctable_call`][crate::call_types::correctable_call].
 ///
 /// Each node in the configuration can send **multiple** responses before
-/// signalling completion.  `Correctable<T>` lets callers either consume
-/// updates one at a time via [`next`][Self::next] or wait for a quorum of
-/// distinct nodes to have responded at least once via a terminal method.
+/// signalling completion.  `Correctable<T>` implements [`futures::Stream`] so
+/// callers can consume updates one at a time, or use a terminal method to wait
+/// for a quorum of distinct nodes to have responded at least once.
+///
+/// # Streaming
+///
+/// `Correctable<T>` implements `futures::Stream<Item = Result<NodeResponse<T>, Error>>`:
+///
+/// ```ignore
+/// use futures::StreamExt;
+///
+/// while let Some(item) = correctable.next().await {
+///     match item {
+///         Ok(nr)  => println!("node {}: {:?}", nr.node_id, nr.result),
+///         Err(e)  => { /* cancelled */ break; }
+///     }
+/// }
+/// ```
+///
+/// `Stream::next()` yields `Some(Err(Error::Cancelled))` if the context's
+/// cancellation token fires, and `None` once all node streams have closed.
 ///
 /// # Terminal methods
 ///
@@ -26,29 +47,68 @@ use crate::responses::NodeResponse;
 /// `first`, `majority`, `all`, and `threshold` count **distinct** nodes.
 /// [`quorum`][Self::quorum] sees every successful value in arrival order
 /// (including multiple values from the same node).
+#[must_use = "call a terminal method or iterate via StreamExt::next() — \
+              the fan-out has already been dispatched"]
 pub struct Correctable<T> {
     pub(crate) rx: mpsc::UnboundedReceiver<NodeResponse<T>>,
     pub(crate) size: usize,
     pub(crate) cancel: CancellationToken,
 }
 
+// ── Stream impl ───────────────────────────────────────────────────────────────
+
+impl<T> Stream for Correctable<T> {
+    type Item = Result<NodeResponse<T>, Error>;
+
+    /// Poll for the next item.
+    ///
+    /// Returns:
+    /// - `Poll::Ready(Some(Ok(nr)))` — a response arrived from one of the nodes.
+    /// - `Poll::Ready(None)` — every node's stream has closed.
+    /// - `Poll::Ready(Some(Err(Error::Cancelled)))` — the context's token fired.
+    /// - `Poll::Pending` — waiting for the next message or cancellation.
+    ///
+    /// Cancellation is checked before the receive queue (biased), matching the
+    /// behaviour of the async terminal methods.  When the receive queue is empty,
+    /// a lightweight waker task is spawned so that cancellation is delivered
+    /// promptly without waiting for the next inbound message.
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // `Correctable<T>` is Unpin (all fields are Unpin), so get_mut is safe.
+        let this = self.get_mut();
+
+        // Biased: deliver cancellation before any queued items.
+        if this.cancel.is_cancelled() {
+            return Poll::Ready(Some(Err(Error::Cancelled)));
+        }
+
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(nr)) => Poll::Ready(Some(Ok(nr))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => {
+                // While the receive queue is empty, arrange for this task to be
+                // woken when the cancellation token fires.  A tiny background task
+                // is spawned to do the wakeup; it exits as soon as the token fires
+                // or is dropped.  One such task is spawned per poll_next that
+                // returns Pending, so in normal usage (one outstanding poll at a
+                // time) there is at most one live waker task per stream.
+                let cancel = this.cancel.clone();
+                let waker = cx.waker().clone();
+                tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    waker.wake();
+                });
+                Poll::Pending
+            }
+        }
+    }
+}
+
+// ── Methods ───────────────────────────────────────────────────────────────────
+
 impl<T> Correctable<T> {
     /// Number of nodes in the configuration this call was sent to.
     pub fn size(&self) -> usize {
         self.size
-    }
-
-    /// Return the next response from any node.
-    ///
-    /// - `Ok(Some(response))` — a response arrived from one of the nodes.
-    /// - `Ok(None)` — every node's stream has closed; no more responses will arrive.
-    /// - `Err(Error::Cancelled)` — the context's cancellation token fired.
-    pub async fn next(&mut self) -> Result<Option<NodeResponse<T>>, Error> {
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(Error::Cancelled),
-            maybe = self.rx.recv() => Ok(maybe),
-        }
     }
 
     /// Wait for the first successful response from any node.

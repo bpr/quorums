@@ -35,6 +35,8 @@ pub struct OrderedNodeResponse<T> {
 /// | [`all`][Self::all] | all n nodes reply |
 /// | [`threshold`][Self::threshold] | at least k nodes reply |
 /// | [`quorum`][Self::quorum] | user predicate returns `Some` |
+#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) — \
+              the fan-out has already been dispatched"]
 pub struct OrderedResponses<T> {
     pub(crate) rx: mpsc::Receiver<OrderedNodeResponse<T>>,
     pub(crate) size: usize,

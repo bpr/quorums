@@ -28,6 +28,8 @@ pub struct NodeResponse<T> {
 /// `first`, `majority`, `all`, and `threshold` return the **first** successful
 /// response received once their threshold is met.  [`quorum`][Self::quorum]
 /// returns whatever value the predicate produces.
+#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) — \
+              the fan-out has already been dispatched"]
 pub struct Responses<T> {
     pub(crate) rx: mpsc::Receiver<NodeResponse<T>>,
     pub(crate) size: usize,
