@@ -282,8 +282,8 @@ fn spawn_streaming_server(addr: SocketAddr, count: u32) {
         let mut srv = Server::new();
         srv.register_streaming_handler::<pb::ReadRequest, pb::ReadResponse, _, _>(
             STREAM_METHOD,
-            move |mut ctx, req| async move {
-                ctx.release(); // allow next message to be dispatched immediately
+            move |ctx, req| async move {
+                let ctx = ctx.release(); // allow next message to be dispatched immediately
                 for i in 0..count {
                     ctx.send(pb::ReadResponse {
                         ok: true,
@@ -1935,8 +1935,8 @@ async fn test_correctable_next_cancelled() {
         let mut srv = Server::new();
         srv.register_streaming_handler::<pb::ReadRequest, pb::ReadResponse, _, _>(
             STREAM_METHOD,
-            move |mut ctx, _req| async move {
-                ctx.release();
+            move |ctx, _req| async move {
+                let ctx = ctx.release();
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 ctx.send(pb::ReadResponse {
                     ok: true,

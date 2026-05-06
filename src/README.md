@@ -322,7 +322,7 @@ impl Server {
         handler: F,
     )
     where
-        F: Fn(ServerCtx, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(ServerCtx<Locked>, Req) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Option<Resp>, Status>> + Send + 'static;
 
     // Register a streaming handler (correctable_call).
@@ -332,7 +332,7 @@ impl Server {
         handler: F,
     )
     where
-        F: Fn(ServerCtx, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(ServerCtx<Locked>, Req) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), Status>> + Send + 'static;
 
     pub fn with_interceptor(self, interceptor: ServerInterceptor) -> Self;
@@ -342,25 +342,71 @@ impl Server {
 
 A built-in health handler at `/_gorums/health` is always registered.
 
-### `ServerCtx`
+### `ServerCtx<S>` — typestate context
 
-Passed to every handler invocation.
+Handlers receive `ServerCtx<Locked>` (written as `ServerCtx` — `Locked` is the
+default type parameter).  Calling `release()` transitions to `ServerCtx<Released>`.
+Both states support `send()` and `metadata()`.
+
+```
+ServerCtx<Locked>  ──.release()──▶  ServerCtx<Released>
+       │                                     │
+       └── dropped without release ──────────┘
+                      │
+              OwnedMutexGuard drops,
+              ordering lock released
+```
 
 ```rust
-pub struct ServerCtx { … }
+// Marker types — zero-sized, erased at compile time.
+pub struct Locked;
+pub struct Released;
 
-impl ServerCtx {
-    // Per-call metadata forwarded by the client.
+pub struct ServerCtx<S = Locked> { … }
+
+// Available on both states:
+impl<S> ServerCtx<S> {
     pub fn metadata(&self) -> &[(String, String)];
     pub fn metadata_get(&self, key: &str) -> Option<&str>;
-
-    // Release the per-stream ordering lock early so the next inbound message
-    // can be dispatched while this handler continues running.
-    pub fn release(&mut self);
-
-    // Send a streaming response (streaming handlers only).
     pub fn send<Resp: ProstMessage>(&self, resp: Resp) -> Result<(), Status>;
 }
+
+// Only available on the Locked state:
+impl ServerCtx<Locked> {
+    /// Consumes the locked context, drops the ordering guard, and returns
+    /// a Released context with the same send channel and metadata.
+    /// Calling release() twice is a compile error (self is consumed).
+    pub fn release(self) -> ServerCtx<Released>;
+}
+```
+
+The ordering lock is held by `OwnedMutexGuard` inside the struct.  No explicit
+`Drop` impl is required — the guard's own destructor releases the lock when
+either state of `ServerCtx` goes out of scope.  Omitting `impl Drop` is also
+what allows `release()` to move fields out of the struct without `unsafe` code
+(Rust forbids moving out of types with a `Drop` impl).
+
+**Typical patterns:**
+
+```rust
+// Two-way handler — lock held until handler returns.
+server.register_handler("/svc/Read",
+    |ctx, req: ReadRequest| async move {
+        // ctx: ServerCtx<Locked> (= ServerCtx)
+        Ok(Some(ReadResponse { value: "hello".into() }))
+        // ctx dropped here → lock released
+    });
+
+// Streaming handler — release early, keep sending.
+server.register_streaming_handler("/svc/Stream",
+    |ctx, req: ReadRequest| async move {
+        let ctx = ctx.release();   // ctx: ServerCtx<Released>; lock released now
+        ctx.send(ReadResponse { value: "first".into() })?;
+        do_slow_work().await;      // next message can dispatch during this
+        ctx.send(ReadResponse { value: "second".into() })?;
+        Ok(())
+    });
+```
 ```
 
 **FIFO ordering:** The server holds a `tokio::sync::Mutex` guard for each

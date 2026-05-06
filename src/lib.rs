@@ -36,5 +36,5 @@ pub use manager::Manager;
 pub use node::{Node, NodeContext, NodeStatus};
 pub use ordered_responses::{OrderedNodeResponse, OrderedResponses};
 pub use responses::{NodeResponse, Responses};
-pub use server::{Server, ServerCtx};
+pub use server::{Locked, Released, Server, ServerCtx};
 pub use tokio_util::sync::CancellationToken;
