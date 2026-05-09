@@ -13,9 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Compile EPaxos proto with quorums-typed wrappers.
     quorums_build::configure()
-        .method("/epaxos.EPaxos/PreAccept", quorums_build::CallType::QuorumCall)
-        .method("/epaxos.EPaxos/Accept",    quorums_build::CallType::QuorumCall)
-        .method("/epaxos.EPaxos/Commit",    quorums_build::CallType::Multicast)
+        .method("/epaxos.EPaxos/PreAccept",    quorums_build::CallType::QuorumCall)
+        .method("/epaxos.EPaxos/Accept",       quorums_build::CallType::QuorumCall)
+        .method("/epaxos.EPaxos/Commit",       quorums_build::CallType::Multicast)
+        .method("/epaxos.EPaxos/Prepare",      quorums_build::CallType::QuorumCall)
+        .method("/epaxos.EPaxos/TryPreAccept", quorums_build::CallType::QuorumCall)
         .compile(&["proto/epaxos.proto"], &["proto"])?;
 
     Ok(())

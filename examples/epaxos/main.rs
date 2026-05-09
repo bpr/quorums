@@ -251,6 +251,13 @@ mod tests {
         // When the leader sends PreAccept{seq=1, deps=[-1,-1,-1]}, peer 1
         // computes local attrs: seq=max(1,5+1)=6, deps[1]=99, which differs
         // from the leader's proposed attrs → peer replies PREACCEPTED → slow path.
+        //
+        // The resulting commit will have deps[1]=99.  Inject a committed
+        // placeholder at (replica=1, slot=99) on all replicas so the SCC
+        // executor doesn't block waiting for a dep that was never proposed.
+        for r in &replicas {
+            r.inject_committed_instance(1, 99, 5);
+        }
         replicas[1].inject_conflict("x", 5, 1, 99);
 
         let cmds = vec![put("x", "slow")];
@@ -263,7 +270,7 @@ mod tests {
             info.deps
         );
 
-        // The slow path must still commit correctly.
+        // The slow path must still commit and execute correctly.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         for (i, replica) in replicas.iter().enumerate() {
@@ -274,6 +281,144 @@ mod tests {
                 "replica {i} missing 'x' after slow-path commit"
             );
         }
+    }
+
+    // ── SCC execution-ordering tests ──────────────────────────────────────────
+    // These tests bypass the network (no cluster setup) and directly commit
+    // instances via `commit_instance_raw` to verify that the SCC executor
+    // applies commands in the correct dependency order.
+
+    #[tokio::test]
+    async fn test_execution_ordering_out_of_order_delivery() {
+        // Instance B depends on A.  B is committed first (blocked: A missing).
+        // When A commits, both should execute: A first, then B.
+        // Final value of "x" must be B's value, not A's.
+        let replica = Replica::new(0, 3);
+
+        // Commit B (slot 1) first — depends on A at slot 0.
+        replica.commit_instance_raw(0, 1, vec![put("x", "B")], 2, vec![0, -1, -1]);
+        assert_eq!(
+            replica.get_store_value("x"),
+            None,
+            "B should be blocked while A is not yet committed"
+        );
+
+        // Commit A (slot 0) — no deps.
+        replica.commit_instance_raw(0, 0, vec![put("x", "A")], 1, vec![-1, -1, -1]);
+        // Executor fires: A executes (x="A"), then B executes (x="B").
+        assert_eq!(
+            replica.get_store_value("x"),
+            Some("B".to_string()),
+            "final value must be B's (executed after A)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scc_cycle_tie_broken_by_seq() {
+        // A (replica 0, slot 0, seq=1) depends on B=(1,0).
+        // B (replica 1, slot 0, seq=2) depends on A=(0,0).
+        // A and B form an SCC (cycle).  Both commands write "x"; the one with
+        // lower seq executes first so the one with higher seq wins.
+        let replica = Replica::new(0, 3);
+
+        // Commit A: deps[1]=0 means A depends on (replica=1, slot=0) = B.
+        replica.commit_instance_raw(0, 0, vec![put("x", "from_A")], 1, vec![-1, 0, -1]);
+        // A is blocked: B=(1,0) not committed yet.
+        assert_eq!(replica.get_store_value("x"), None, "A blocked on B");
+
+        // Commit B: deps[0]=0 means B depends on (replica=0, slot=0) = A.
+        replica.commit_instance_raw(1, 0, vec![put("x", "from_B")], 2, vec![0, -1, -1]);
+        // Executor finds {A, B} — an SCC (cycle).  Sorted by seq: A(1) then B(2).
+        // x = "from_A" then x = "from_B".  Final: "from_B".
+        assert_eq!(
+            replica.get_store_value("x"),
+            Some("from_B".to_string()),
+            "higher-seq command in the SCC must execute last"
+        );
+    }
+
+    // ── Recovery tests ────────────────────────────────────────────────────────
+    // These tests simulate a leader crash after various phases and verify that
+    // another replica can recover the instance via the Prepare protocol.
+
+    /// Slow-path recovery: one peer has ACCEPTED state (from a crashed leader
+    /// that completed Accept but not Commit).  The recoverer must find the
+    /// ACCEPTED reply, re-do Accept with those attrs, then Commit.
+    #[tokio::test]
+    async fn test_recovery_accepted() {
+        const BASE: u16 = 19042;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
+
+        // Replica 1 received Accept from the crashed leader (replica 0) and
+        // transitioned to ACCEPTED.  Replica 0 itself has no state (crashed
+        // before recording anything locally).
+        let deps = vec![-1i32, -1, -1];
+        replicas[1].inject_accepted_instance(0, 0, vec![put("x", "recovered")], 1, deps);
+
+        // Replica 2 is the recoverer.
+        let info = replicas[2]
+            .recover(0, 0, &peers_cfgs[2])
+            .await
+            .expect("recovery failed");
+
+        assert!(
+            !info.fast_path,
+            "ACCEPTED path must use slow recovery: seq={} deps={:?}",
+            info.seq,
+            info.deps
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let val = replicas[2].get_store_value("x");
+        assert_eq!(
+            val.as_deref(),
+            Some("recovered"),
+            "replica 2 missing 'x' after accepted-path recovery"
+        );
+    }
+
+    /// Fast-path recovery via TryPreAccept: both peers have PREACCEPTED state
+    /// with equal attrs (crashed leader sent PreAccept but not Accept/Commit).
+    /// The recoverer discovers N-1 equal PREACCEPTED replies, confirms no
+    /// conflicts via TryPreAccept, and commits on the fast path.
+    #[tokio::test]
+    async fn test_recovery_preaccepted_fast_path() {
+        const BASE: u16 = 19045;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
+
+        // Both peers (0 and 1) received PreAccept from the crashed leader and
+        // replied PREACCEPTED_EQ.  Leader crashed before Commit.
+        let deps = vec![-1i32, -1, -1];
+        replicas[0].inject_preaccepted_instance(
+            0, 0, vec![put("x", "fast_recovered")], 1, deps.clone(),
+        );
+        replicas[1].inject_preaccepted_instance(
+            0, 0, vec![put("x", "fast_recovered")], 1, deps.clone(),
+        );
+
+        // Replica 2 is the recoverer.  Prepare sees N-1=2 PREACCEPTED replies
+        // with identical attrs → TryPreAccept → all ok → fast commit.
+        let info = replicas[2]
+            .recover(0, 0, &peers_cfgs[2])
+            .await
+            .expect("recovery failed");
+
+        assert!(
+            info.fast_path,
+            "expected fast-path recovery but got slow path: seq={} deps={:?}",
+            info.seq,
+            info.deps
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let val = replicas[2].get_store_value("x");
+        assert_eq!(
+            val.as_deref(),
+            Some("fast_recovered"),
+            "replica 2 missing 'x' after fast-path recovery"
+        );
     }
 
     #[tokio::test]

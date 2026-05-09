@@ -24,6 +24,7 @@ tokio-util = "0.7"
 futures = "0.3"
 dashmap = "6"
 bytes = "1"
+petgraph = "0.6"
 
 [build-dependencies]
 tonic-build = "0.13"

@@ -51,6 +51,10 @@ This is the key design difference from vanilla gRPC: instead of one stream per m
 
 All call-type functions and `register_handler` are fully generic. Internal handler storage uses `Arc<dyn Fn(...)>` (an implementation detail callers never see).
 
+## Code style
+
+- Do not place `use` declarations inside functions. All imports belong at the top of the containing file or module.
+
 ### Planned additions (all additive, no breaking changes)
 
 - **Correctable** (streaming quorum call) — needs `Streaming: bool` flag in `OutboundRequest` and a `Correctable<T>` type.

@@ -30,8 +30,30 @@ message CommitRequest {
 
 message Empty {}
 
+message PrepareRequest {
+    int32 leader_id = 1; int32 replica = 2; int32 slot = 3; int32 ballot = 4;
+}
+
+// status mirrors the instance status: 0=NONE, 1=PREACCEPTED, 3=ACCEPTED, 4=COMMITTED
+message PrepareReply {
+    int32 replica = 1; int32 slot = 2; bool ok = 3; int32 ballot = 4;
+    int32 status = 5; int32 seq = 6; repeated int32 deps = 7; repeated Command cmds = 8;
+}
+
+message TryPreAcceptRequest {
+    int32 leader_id = 1; int32 replica = 2; int32 slot = 3; int32 ballot = 4;
+    int32 seq = 5; repeated int32 deps = 6; repeated Command cmds = 7;
+}
+
+message TryPreAcceptReply {
+    int32 replica = 1; int32 slot = 2; bool ok = 3; int32 ballot = 4;
+    int32 conflict_replica = 5; int32 conflict_slot = 6;
+}
+
 service EPaxos {
     rpc PreAccept(PreAcceptRequest) returns (PreAcceptReply);
     rpc Accept(AcceptRequest) returns (AcceptReply);
     rpc Commit(CommitRequest) returns (Empty);
+    rpc Prepare(PrepareRequest) returns (PrepareReply);
+    rpc TryPreAccept(TryPreAcceptRequest) returns (TryPreAcceptReply);
 }
