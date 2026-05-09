@@ -1,0 +1,37 @@
+syntax = "proto3";
+package epaxos;
+
+enum Operation { NOP = 0; PUT = 1; GET = 2; }
+
+message Command { Operation op = 1; string key = 2; string value = 3; }
+
+message PreAcceptRequest {
+    int32 leader_id = 1; int32 replica = 2; int32 slot = 3; int32 ballot = 4;
+    int32 seq = 5; repeated int32 deps = 6; repeated Command cmds = 7;
+}
+
+// status: 1=PREACCEPTED (attrs differ, slow path), 2=PREACCEPTED_EQ (attrs match, fast path)
+message PreAcceptReply {
+    int32 replica = 1; int32 slot = 2; int32 status = 3; int32 ballot = 4;
+    int32 seq = 5; repeated int32 deps = 6; repeated int32 committed_deps = 7;
+}
+
+message AcceptRequest {
+    int32 leader_id = 1; int32 replica = 2; int32 slot = 3; int32 ballot = 4;
+    int32 seq = 5; repeated int32 deps = 6; repeated Command cmds = 7;
+}
+
+message AcceptReply { int32 replica = 1; int32 slot = 2; bool ok = 3; int32 ballot = 4; }
+
+message CommitRequest {
+    int32 leader_id = 1; int32 replica = 2; int32 slot = 3;
+    repeated Command cmds = 4; int32 seq = 5; repeated int32 deps = 6;
+}
+
+message Empty {}
+
+service EPaxos {
+    rpc PreAccept(PreAcceptRequest) returns (PreAcceptReply);
+    rpc Accept(AcceptRequest) returns (AcceptReply);
+    rpc Commit(CommitRequest) returns (Empty);
+}
