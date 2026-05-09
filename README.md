@@ -146,13 +146,33 @@ Benefits:
 `quorums-build` generates these structs automatically.  Define them manually
 only when not using the code generator.
 
+### Lazy fan-out and `send_now`
+
+`Responses<T>`, `OrderedResponses<T>`, and `Correctable<T>` are all
+`#[must_use]` and use **deferred dispatch**: no network I/O begins until a
+terminal method (`.majority()`, `.all()`, `.threshold(k)`, `.quorum(f)`) is
+called.  Dropping a handle without calling a terminal method means no fan-out
+ever fires.
+
+Each handle exposes `send_now(&mut self)` to trigger the fan-out immediately
+without yet blocking on results.  This enables pipelining:
+
+```rust
+// Both fan-outs fire concurrently inside the join — neither is awaited first.
+let r1 = quorum_call(&ctx, &req1, ReadMethod).await?;
+let r2 = quorum_call(&ctx, &req2, ReadMethod).await?;
+let (v1, v2) = tokio::join!(r1.majority(), r2.majority());
+```
+
+`send_now` is idempotent — safe to call multiple times or before a terminal
+method.
+
 ### `#[must_use]` on response handles
 
 `Responses<T>`, `OrderedResponses<T>`, and `Correctable<T>` are all marked
 `#[must_use]`.  If you call `quorum_call(…)` and discard the handle without
 calling `.majority()` / `.all()` / etc., the compiler emits a warning.  This
-prevents a silent footgun where the fan-out fires but the caller never waits
-for the results.
+prevents a silent footgun where the fan-out is silently never sent.
 
 ### `Correctable<T>: futures::Stream`
 

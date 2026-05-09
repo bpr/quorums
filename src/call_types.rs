@@ -240,46 +240,49 @@ pub async fn quorum_call<M: QuorumCallMethod>(
     )
     .await?;
 
-    let nodes = ctx.config.nodes();
+    let nodes = ctx.config.nodes().to_vec();
     let n = nodes.len();
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
     let (result_tx, result_rx) = mpsc::channel::<NodeResponse<M::Resp>>(n);
 
-    for node in nodes {
-        let node = node.clone();
-        let payload = payload.clone();
-        let result_tx = result_tx.clone();
-        let node_id = node.id();
-        let meta = meta.clone();
+    let launch: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+        for node in nodes {
+            let node = node.clone();
+            let payload = payload.clone();
+            let result_tx = result_tx.clone();
+            let node_id = node.id();
+            let meta = meta.clone();
 
-        tokio::spawn(async move {
-            let result = send_twoway(&node, M::PATH, payload, meta).await;
-            let node_resp = match result {
-                Err(e) => NodeResponse {
-                    node_id,
-                    result: Err(e),
-                },
-                Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
+            tokio::spawn(async move {
+                let result = send_twoway(&node, M::PATH, payload, meta).await;
+                let node_resp = match result {
                     Err(e) => NodeResponse {
                         node_id,
-                        result: Err(e.into()),
+                        result: Err(e),
                     },
-                    Ok(val) => NodeResponse {
-                        node_id,
-                        result: Ok(val),
+                    Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
+                        Err(e) => NodeResponse {
+                            node_id,
+                            result: Err(e.into()),
+                        },
+                        Ok(val) => NodeResponse {
+                            node_id,
+                            result: Ok(val),
+                        },
                     },
-                },
-            };
-            let _ = result_tx.send(node_resp).await;
-        });
-    }
+                };
+                let _ = result_tx.send(node_resp).await;
+            });
+        }
+    });
 
     Ok(Responses {
         rx: result_rx,
         size: n,
         cancel: ctx.cancel.clone(),
+        launch: Some(launch),
     })
 }
 
@@ -305,68 +308,71 @@ pub async fn correctable_call<M: CorrectableMethod>(
     )
     .await?;
 
-    let nodes = ctx.config.nodes();
+    let nodes = ctx.config.nodes().to_vec();
     let n = nodes.len();
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
     let (result_tx, result_rx) = mpsc::unbounded_channel::<NodeResponse<M::Resp>>();
 
-    for node in nodes {
-        let node = node.clone();
-        let payload = payload.clone();
-        let result_tx = result_tx.clone();
-        let node_id = node.id();
-        let meta = meta.clone();
+    let launch: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+        for node in nodes {
+            let node = node.clone();
+            let payload = payload.clone();
+            let result_tx = result_tx.clone();
+            let node_id = node.id();
+            let meta = meta.clone();
 
-        tokio::spawn(async move {
-            let ch = node.channel();
-            let seq = ch.next_seq();
-            let wire = build_wire_message(seq, M::PATH, payload, meta);
+            tokio::spawn(async move {
+                let ch = node.channel();
+                let seq = ch.next_seq();
+                let wire = build_wire_message(seq, M::PATH, payload, meta);
 
-            let mut stream_rx = ch.register_stream(seq);
+                let mut stream_rx = ch.register_stream(seq);
 
-            if ch
-                .enqueue(OutboundRequest {
-                    msg: wire,
-                    response_tx: None,
-                    send_ack: None,
-                })
-                .is_err()
-            {
-                let _ = result_tx.send(NodeResponse {
-                    node_id,
-                    result: Err(Error::NodeClosed),
-                });
-                return;
-            }
-
-            while let Some(wire_result) = stream_rx.recv().await {
-                let node_resp = match wire_result {
-                    Err(e) => NodeResponse {
+                if ch
+                    .enqueue(OutboundRequest {
+                        msg: wire,
+                        response_tx: None,
+                        send_ack: None,
+                    })
+                    .is_err()
+                {
+                    let _ = result_tx.send(NodeResponse {
                         node_id,
-                        result: Err(e),
-                    },
-                    Ok(msg) => match decode_payload::<M::Resp>(&msg) {
+                        result: Err(Error::NodeClosed),
+                    });
+                    return;
+                }
+
+                while let Some(wire_result) = stream_rx.recv().await {
+                    let node_resp = match wire_result {
                         Err(e) => NodeResponse {
                             node_id,
-                            result: Err(e.into()),
+                            result: Err(e),
                         },
-                        Ok(val) => NodeResponse {
-                            node_id,
-                            result: Ok(val),
+                        Ok(msg) => match decode_payload::<M::Resp>(&msg) {
+                            Err(e) => NodeResponse {
+                                node_id,
+                                result: Err(e.into()),
+                            },
+                            Ok(val) => NodeResponse {
+                                node_id,
+                                result: Ok(val),
+                            },
                         },
-                    },
-                };
-                let _ = result_tx.send(node_resp);
-            }
-        });
-    }
+                    };
+                    let _ = result_tx.send(node_resp);
+                }
+            });
+        }
+    });
 
     Ok(Correctable {
         rx: result_rx,
         size: n,
         cancel: ctx.cancel.clone(),
+        launch: Some(launch),
     })
 }
 
@@ -408,49 +414,52 @@ pub async fn ordered_quorum_call<M: OrderedQuorumCallMethod>(
     )
     .await?;
 
-    let nodes = ctx.config.nodes();
+    let nodes = ctx.config.nodes().to_vec();
     let n = nodes.len();
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
     let (result_tx, result_rx) = mpsc::channel::<OrderedNodeResponse<M::Resp>>(n);
 
-    for (position, node) in nodes.iter().enumerate() {
-        let node = node.clone();
-        let payload = payload.clone();
-        let result_tx = result_tx.clone();
-        let node_id = node.id();
-        let meta = meta.clone();
+    let launch: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
+        for (position, node) in nodes.iter().enumerate() {
+            let node = node.clone();
+            let payload = payload.clone();
+            let result_tx = result_tx.clone();
+            let node_id = node.id();
+            let meta = meta.clone();
 
-        tokio::spawn(async move {
-            let result = send_twoway(&node, M::PATH, payload, meta).await;
-            let node_resp = match result {
-                Err(e) => OrderedNodeResponse {
-                    position,
-                    node_id,
-                    result: Err(e),
-                },
-                Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
+            tokio::spawn(async move {
+                let result = send_twoway(&node, M::PATH, payload, meta).await;
+                let node_resp = match result {
                     Err(e) => OrderedNodeResponse {
                         position,
                         node_id,
-                        result: Err(e.into()),
+                        result: Err(e),
                     },
-                    Ok(val) => OrderedNodeResponse {
-                        position,
-                        node_id,
-                        result: Ok(val),
+                    Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
+                        Err(e) => OrderedNodeResponse {
+                            position,
+                            node_id,
+                            result: Err(e.into()),
+                        },
+                        Ok(val) => OrderedNodeResponse {
+                            position,
+                            node_id,
+                            result: Ok(val),
+                        },
                     },
-                },
-            };
-            let _ = result_tx.send(node_resp).await;
-        });
-    }
+                };
+                let _ = result_tx.send(node_resp).await;
+            });
+        }
+    });
 
     Ok(OrderedResponses {
         rx: result_rx,
         size: n,
         cancel: ctx.cancel.clone(),
+        launch: Some(launch),
     })
 }
 

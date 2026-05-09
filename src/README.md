@@ -258,15 +258,34 @@ Returns a [`Correctable<M::Resp>`](#correctablet) handle.
 
 ## Response handles
 
-All three response handle types are `#[must_use]`.  The compiler emits a
-warning if the handle is dropped without calling a terminal method — which
-would silently discard a fan-out that is already in flight.
+All three response handle types are `#[must_use]`.  The fan-out is
+**deferred** — no network I/O begins until a terminal method (or `send_now()`)
+is called.  Dropping a handle without calling a terminal method means the
+fan-out never fires at all.
+
+### Lazy fan-out and `send_now`
+
+Each handle exposes a `send_now(&mut self)` method that triggers the fan-out
+immediately without blocking on results.  Terminal methods call it
+automatically, so explicit use is only needed when you want to start I/O
+before you are ready to await:
+
+```rust
+// Pipeline two reads — both fan-outs fire concurrently inside the join.
+let r1 = quorum_call(&ctx, &req1, ReadMethod).await?;
+let r2 = quorum_call(&ctx, &req2, ReadMethod).await?;
+let (v1, v2) = tokio::join!(r1.majority(), r2.majority());
+```
+
+`send_now` is idempotent — safe to call multiple times or before a terminal
+method.
 
 ### `Responses<T>`
 
 ```rust
 impl<T> Responses<T> {
     pub fn size(&self) -> usize;
+    pub fn send_now(&mut self);                               // trigger fan-out now
     pub async fn first(self)           -> Result<T, Error>;  // any 1 node
     pub async fn majority(self)        -> Result<T, Error>;  // ⌈(n+1)/2⌉ nodes
     pub async fn all(self)             -> Result<T, Error>;  // all n nodes
@@ -281,6 +300,14 @@ resolves when `f` returns `Some`.
 
 ### `OrderedResponses<T>`
 
+```rust
+impl<T> OrderedResponses<T> {
+    pub fn size(&self) -> usize;
+    pub fn send_now(&mut self);
+    // same terminal methods as Responses<T>
+}
+```
+
 Identical terminal methods to `Responses<T>`, but threshold-based methods
 return the value from the **lowest-position** node.  `quorum(f)` receives
 `f(&[Option<T>])` — one slot per configuration node.
@@ -290,6 +317,7 @@ return the value from the **lowest-position** node.  `quorum(f)` receives
 ```rust
 impl<T> Correctable<T> {
     pub fn size(&self) -> usize;
+    pub fn send_now(&mut self);
 
     // Manual iteration — receive one response at a time.
     pub async fn next(&mut self) -> Result<Option<NodeResponse<T>>, Error>;

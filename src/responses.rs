@@ -28,18 +28,31 @@ pub struct NodeResponse<T> {
 /// `first`, `majority`, `all`, and `threshold` return the **first** successful
 /// response received once their threshold is met.  [`quorum`][Self::quorum]
 /// returns whatever value the predicate produces.
-#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) — \
-              the fan-out has already been dispatched"]
+#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) to \
+              dispatch the fan-out and collect results"]
 pub struct Responses<T> {
     pub(crate) rx: mpsc::Receiver<NodeResponse<T>>,
     pub(crate) size: usize,
     pub(crate) cancel: CancellationToken,
+    /// Deferred fan-out.  `None` once `send_now()` has been called.
+    pub(crate) launch: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl<T> Responses<T> {
     /// Number of nodes in the configuration this call was sent to.
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// Dispatch the fan-out immediately without blocking on a result.
+    ///
+    /// All terminal methods call this automatically on entry; use it explicitly
+    /// only when you want to start network I/O before you are ready to block.
+    /// Calling `send_now` multiple times is a no-op.
+    pub fn send_now(&mut self) {
+        if let Some(f) = self.launch.take() {
+            f();
+        }
     }
 
     /// Wait for the first successful response from any node.
@@ -65,6 +78,7 @@ impl<T> Responses<T> {
     /// closes before `k` successes are collected, or [`Error::Cancelled`] if
     /// the context was cancelled.
     pub async fn threshold(mut self, k: usize) -> Result<T, Error> {
+        self.send_now();
         let mut count = 0usize;
         let mut first_ok: Option<T> = None;
         let mut node_errors: Vec<NodeError> = Vec::new();
@@ -125,6 +139,7 @@ impl<T> Responses<T> {
     where
         F: FnMut(&[T]) -> Option<T>,
     {
+        self.send_now();
         let mut oks: Vec<T> = Vec::new();
         let mut node_errors: Vec<NodeError> = Vec::new();
 

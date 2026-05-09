@@ -35,18 +35,31 @@ pub struct OrderedNodeResponse<T> {
 /// | [`all`][Self::all] | all n nodes reply |
 /// | [`threshold`][Self::threshold] | at least k nodes reply |
 /// | [`quorum`][Self::quorum] | user predicate returns `Some` |
-#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) — \
-              the fan-out has already been dispatched"]
+#[must_use = "call a terminal method (.majority(), .all(), .threshold(k), .quorum(f)) to \
+              dispatch the fan-out and collect results"]
 pub struct OrderedResponses<T> {
     pub(crate) rx: mpsc::Receiver<OrderedNodeResponse<T>>,
     pub(crate) size: usize,
     pub(crate) cancel: CancellationToken,
+    /// Deferred fan-out.  `None` once `send_now()` has been called.
+    pub(crate) launch: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl<T> OrderedResponses<T> {
     /// Number of nodes in the configuration this call was sent to.
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// Dispatch the fan-out immediately without blocking on a result.
+    ///
+    /// All terminal methods call this automatically on entry; use it explicitly
+    /// only when you want to start network I/O before you are ready to block.
+    /// Calling `send_now` multiple times is a no-op.
+    pub fn send_now(&mut self) {
+        if let Some(f) = self.launch.take() {
+            f();
+        }
     }
 
     /// Wait for the first successful reply; return the value from that node.
@@ -73,6 +86,7 @@ impl<T> OrderedResponses<T> {
     /// closes before `k` successes arrive, or [`Error::Cancelled`] if the
     /// context's token fires.
     pub async fn threshold(mut self, k: usize) -> Result<T, Error> {
+        self.send_now();
         // Track by position: Some(val) once that node has replied successfully.
         let mut slots: Vec<Option<T>> = (0..self.size).map(|_| None).collect();
         let mut count = 0usize;
@@ -149,6 +163,7 @@ impl<T> OrderedResponses<T> {
         T: Clone,
         F: FnMut(&[Option<T>]) -> Option<T>,
     {
+        self.send_now();
         let mut slots: Vec<Option<T>> = (0..self.size).map(|_| None).collect();
         let mut node_errors: Vec<NodeError> = Vec::new();
 

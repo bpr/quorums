@@ -47,12 +47,14 @@ use crate::responses::NodeResponse;
 /// `first`, `majority`, `all`, and `threshold` count **distinct** nodes.
 /// [`quorum`][Self::quorum] sees every successful value in arrival order
 /// (including multiple values from the same node).
-#[must_use = "call a terminal method or iterate via StreamExt::next() — \
-              the fan-out has already been dispatched"]
+#[must_use = "call a terminal method or iterate via StreamExt::next() to \
+              dispatch the fan-out and collect results"]
 pub struct Correctable<T> {
     pub(crate) rx: mpsc::UnboundedReceiver<NodeResponse<T>>,
     pub(crate) size: usize,
     pub(crate) cancel: CancellationToken,
+    /// Deferred fan-out.  `None` once `send_now()` has been called.
+    pub(crate) launch: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 // ── Stream impl ───────────────────────────────────────────────────────────────
@@ -75,6 +77,9 @@ impl<T> Stream for Correctable<T> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // `Correctable<T>` is Unpin (all fields are Unpin), so get_mut is safe.
         let this = self.get_mut();
+
+        // Trigger the fan-out on the first poll if not already sent.
+        this.send_now();
 
         // Biased: deliver cancellation before any queued items.
         if this.cancel.is_cancelled() {
@@ -111,6 +116,17 @@ impl<T> Correctable<T> {
         self.size
     }
 
+    /// Dispatch the fan-out immediately without blocking on a result.
+    ///
+    /// All terminal methods and `Stream::poll_next` call this automatically;
+    /// use it explicitly only when you want to start network I/O before you are
+    /// ready to consume responses.  Calling `send_now` multiple times is a no-op.
+    pub fn send_now(&mut self) {
+        if let Some(f) = self.launch.take() {
+            f();
+        }
+    }
+
     /// Wait for the first successful response from any node.
     pub async fn first(self) -> Result<T, Error> {
         self.threshold(1).await
@@ -137,6 +153,7 @@ impl<T> Correctable<T> {
     /// fail before the threshold can be reached, or the channel closes early.
     /// Returns [`Error::Cancelled`] if the context was cancelled.
     pub async fn threshold(mut self, k: usize) -> Result<T, Error> {
+        self.send_now();
         let mut responded: HashSet<u32> = HashSet::new(); // node IDs with ≥1 success
         let mut failed: HashSet<u32> = HashSet::new(); // node IDs that only errored
         let mut node_errors: Vec<NodeError> = Vec::new();
@@ -196,6 +213,7 @@ impl<T> Correctable<T> {
     where
         F: FnMut(&[T]) -> Option<T>,
     {
+        self.send_now();
         let mut oks: Vec<T> = Vec::new();
         let mut node_errors: Vec<NodeError> = Vec::new();
 

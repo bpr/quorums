@@ -2147,3 +2147,88 @@ async fn test_health_checker_multiple_nodes() {
         "all nodes should be Healthy"
     );
 }
+
+// ── Lazy-sending tests ────────────────────────────────────────────────────────
+
+/// Helper: spin up 3 servers pre-loaded with key="lazy_key" value="lazy_val".
+async fn setup_three_nodes_with_data() -> (Manager, quorums::Configuration) {
+    let addrs: Vec<SocketAddr> = (0..3)
+        .map(|_| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        })
+        .collect();
+
+    for addr in &addrs {
+        let state = StorageState::default();
+        state
+            .data
+            .lock()
+            .unwrap()
+            .insert("lazy_key".into(), "lazy_val".into());
+        spawn_server(*addr, state);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut mgr = Manager::new();
+    let cfg = mgr
+        .add_node_list(
+            &addrs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .expect("add_node_list");
+
+    (mgr, cfg)
+}
+
+/// `send_now()` dispatches the fan-out before the terminal method is called.
+/// Calling the terminal method afterward must still collect replies normally.
+#[tokio::test]
+async fn test_lazy_send_now_explicit() {
+    let (_mgr, cfg) = setup_three_nodes_with_data().await;
+    let req = pb::ReadRequest { key: "lazy_key".into() };
+
+    let mut responses = quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
+        .await
+        .expect("quorum_call");
+
+    // Manually trigger the fan-out before calling the terminal method.
+    responses.send_now();
+
+    // Calling send_now again is a no-op (idempotent).
+    responses.send_now();
+
+    let resp = responses.majority().await.expect("majority");
+    assert!(resp.ok);
+    assert_eq!(resp.value, "lazy_val");
+}
+
+/// Two quorum calls created back-to-back (no awaiting of results yet), then
+/// both fan-outs triggered concurrently via `tokio::join!`.  With lazy sending
+/// the network I/O for both calls starts at the same time.
+#[tokio::test]
+async fn test_lazy_pipelined_quorum_calls() {
+    let (_mgr, cfg) = setup_three_nodes_with_data().await;
+
+    let req1 = pb::ReadRequest { key: "lazy_key".into() };
+    let req2 = pb::ReadRequest { key: "lazy_key".into() };
+
+    // Build both handles — no network I/O yet.
+    let r1 = quorum_call(&cfg.context(), &req1, pb::StorageReadMethod)
+        .await
+        .expect("quorum_call 1");
+    let r2 = quorum_call(&cfg.context(), &req2, pb::StorageReadMethod)
+        .await
+        .expect("quorum_call 2");
+
+    // Both fan-outs fire concurrently when joined.
+    let (v1, v2) = tokio::join!(r1.majority(), r2.majority());
+    assert_eq!(v1.expect("r1").value, "lazy_val");
+    assert_eq!(v2.expect("r2").value, "lazy_val");
+}
