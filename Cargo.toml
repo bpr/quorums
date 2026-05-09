@@ -2,6 +2,7 @@
 name = "quorums"
 version = "0.1.0"
 edition = "2024"
+description = "Rust implementation of Gorums gRPC quorum framework"
 license = "MIT"
 rust-version = "1.93.1"
 authors = ["Brian Rogoff <brogoff@gmail.com>"]
