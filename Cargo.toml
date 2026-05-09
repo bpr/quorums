@@ -1,11 +1,18 @@
-[workspace]
-members = [".", "quorums-build"]
-resolver = "2"
-
 [package]
 name = "quorums"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+rust-version = "1.93.1"
+authors = ["Brian Rogoff <brogoff@gmail.com>"]
+repository = "https://github.com/bpr/quorums"
+readme = "README.md"
+
+keywords = ["gorums", "consensus", "rpc"]
+
+[workspace]
+members = [".", "quorums-build"]
+resolver = "2"
 
 [dependencies]
 tonic = "0.13"

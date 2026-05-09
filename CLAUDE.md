@@ -45,7 +45,7 @@ This is the key design difference from vanilla gRPC: instead of one stream per m
 
 ### FIFO ordering (server side)
 
-`Server::node_stream` holds a `tokio::sync::Mutex` guard across each handler dispatch. The guard is passed into `ServerCtx` and dropped when the handler calls `ctx.release()` or returns. This serialises message dispatch per stream while still allowing handlers to run concurrently once they release.
+`Server::node_stream` holds a `tokio::sync::Mutex` guard across each handler dispatch. The guard is passed into `ServerCtx` and dropped when the handler calls `ctx.release()` or returns. This serializes message dispatch per stream while still allowing handlers to run concurrently once they release.
 
 ### No `dyn Trait` in the public API
 

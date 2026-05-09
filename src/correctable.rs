@@ -69,7 +69,7 @@ impl<T> Stream for Correctable<T> {
     /// - `Poll::Pending` — waiting for the next message or cancellation.
     ///
     /// Cancellation is checked before the receive queue (biased), matching the
-    /// behaviour of the async terminal methods.  When the receive queue is empty,
+    /// behavior of the async terminal methods.  When the receive queue is empty,
     /// a lightweight waker task is spawned so that cancellation is delivered
     /// promptly without waiting for the next inbound message.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

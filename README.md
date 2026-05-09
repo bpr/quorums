@@ -60,12 +60,12 @@ Expected output:
 Starting 3 storage nodes on ports [19001, 19002, 19003]…
 Connected to 3 nodes.
 
-=== Multicast write: set 'colour' = 'blue' on all nodes ===
+=== Multicast write: set 'color' = 'blue' on all nodes ===
 → /storage.Storage/Write (nodes [1, 2, 3])
-  [node] write "colour" = "blue"
+  [node] write "color" = "blue"
   …
 
-=== Quorum read: read 'colour' — accept on majority ===
+=== Quorum read: read 'color' — accept on majority ===
 → /storage.Storage/Read (nodes [1, 2, 3])
   ok=true, value="blue"
 

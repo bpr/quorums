@@ -511,7 +511,7 @@ server.register_streaming_handler("/svc/Stream",
 
 **FIFO ordering:** The server holds a `tokio::sync::Mutex` guard for each
 inbound message until the handler calls `ctx.release()` or returns.  This
-serialises dispatch per stream while allowing handlers to run concurrently once
+serializes dispatch per stream while allowing handlers to run concurrently once
 they release.
 
 ---

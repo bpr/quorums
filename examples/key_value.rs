@@ -115,11 +115,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Multicast write ───────────────────────────────────────────────────────
     // Write the same key to all nodes simultaneously.  No response is awaited.
-    println!("=== Multicast write: set 'colour' = 'blue' on all nodes ===");
+    println!("=== Multicast write: set 'color' = 'blue' on all nodes ===");
     storage_client::write(
         &cfg.context().with_interceptor(log.clone()),
         &pb::WriteRequest {
-            key: "colour".into(),
+            key: "color".into(),
             value: "blue".into(),
         },
     )
@@ -127,11 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Quorum read — majority ────────────────────────────────────────────────
     // Fan-out to all nodes; accept once a majority (≥2 of 3) have replied.
-    println!("\n=== Quorum read: read 'colour' — accept on majority ===");
+    println!("\n=== Quorum read: read 'color' — accept on majority ===");
     let resp = storage_client::read(
         &cfg.context().with_interceptor(log.clone()),
         &pb::ReadRequest {
-            key: "colour".into(),
+            key: "color".into(),
         },
     )
     .await?
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resp = storage_client::read(
         &cfg.context().with_interceptor(log.clone()),
         &pb::ReadRequest {
-            key: "colour".into(),
+            key: "color".into(),
         },
     )
     .await?
@@ -169,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resp = quorums::call_types::rpc_call(
         &ctx,
         &pb::ReadRequest {
-            key: "colour".into(),
+            key: "color".into(),
         },
         pb::StorageReadMethod,
     )
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = storage_client::read(
         &cfg.context().with_cancel(token),
         &pb::ReadRequest {
-            key: "colour".into(),
+            key: "color".into(),
         },
     )
     .await?
