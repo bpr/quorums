@@ -2,6 +2,10 @@
 name = "quorums-build"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+authors = ["Brian Rogoff <brogoff@gmail.com>"]
+repository = "https://github.com/bpr/quorums"
+description = "Build-time code generator for the quorums gorums-style RPC framework"
 
 [dependencies]
 tonic-build = "0.13"

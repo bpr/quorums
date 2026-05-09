@@ -26,4 +26,4 @@ bytes = "1"
 
 [build-dependencies]
 tonic-build = "0.13"
-quorums-build = { path = "quorums-build" }
+quorums-build = { version = "0.1.0", path = "quorums-build" }
