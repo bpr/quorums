@@ -154,7 +154,7 @@ async fn test_multicast_then_quorum_call() {
         key: "hello".to_string(),
         value: "world".to_string(),
     };
-    multicast(&cfg.context(), &write_req, WRITE_METHOD)
+    multicast(&cfg.context(), &write_req, pb::StorageWriteMethod)
         .await
         .expect("multicast");
 
@@ -166,7 +166,7 @@ async fn test_multicast_then_quorum_call() {
         key: "hello".to_string(),
     };
     let resp =
-        quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &read_req, READ_METHOD)
+        quorum_call(&cfg.context(), &read_req, pb::StorageReadMethod)
             .await
             .expect("quorum_call dispatch")
             .majority()
@@ -197,7 +197,7 @@ async fn test_rpc_and_unicast() {
         key: "x".into(),
         value: "42".into(),
     };
-    unicast(&node.context(), &write_req, WRITE_METHOD)
+    unicast(&node.context(), &write_req, pb::StorageWriteMethod)
         .await
         .expect("unicast");
 
@@ -206,7 +206,7 @@ async fn test_rpc_and_unicast() {
     // rpc_call read
     let read_req = pb::ReadRequest { key: "x".into() };
     let resp =
-        rpc_call::<pb::ReadRequest, pb::ReadResponse>(&node.context(), &read_req, READ_METHOD)
+        rpc_call(&node.context(), &read_req, pb::StorageReadMethod)
             .await
             .expect("rpc_call");
 
@@ -275,6 +275,15 @@ async fn test_codegen_client_and_server() {
 
 const STREAM_METHOD: &str = "/storage.Storage/StreamRead";
 
+/// Typed method handle for the correctable streaming tests.
+struct StreamReadMethod;
+
+impl quorums::CorrectableMethod for StreamReadMethod {
+    type Req = pb::ReadRequest;
+    type Resp = pb::ReadResponse;
+    const PATH: &'static str = STREAM_METHOD;
+}
+
 /// Spawn a server that supports a streaming correctable handler.
 /// Each call to `STREAM_METHOD` sends `count` responses then finishes.
 fn spawn_streaming_server(addr: SocketAddr, count: u32) {
@@ -330,7 +339,7 @@ async fn test_correctable_majority() {
 
     // terminal method: wait for majority of distinct nodes to have responded
     let resp =
-        correctable_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, STREAM_METHOD)
+        correctable_call(&cfg.context(), &req, StreamReadMethod)
             .await
             .expect("correctable dispatch")
             .majority()
@@ -340,7 +349,7 @@ async fn test_correctable_majority() {
 
     // manual iteration: drain all responses (2 per node × 3 nodes = 6 total)
     let mut c =
-        correctable_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, STREAM_METHOD)
+        correctable_call(&cfg.context(), &req, StreamReadMethod)
             .await
             .expect("correctable dispatch 2");
     let mut total = 0usize;
@@ -399,7 +408,7 @@ async fn test_quorum_fn_on_responses() {
 
     // Custom quorum: accept once 2 nodes have replied with ok=true and the
     // same value.  Returns the agreed value.
-    let resp = quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx, &req, READ_METHOD)
+    let resp = quorum_call(&ctx, &req, pb::StorageReadMethod)
         .await
         .expect("quorum_fn dispatch")
         .quorum(|replies: &[pb::ReadResponse]| {
@@ -463,7 +472,7 @@ async fn test_quorum_fn_on_correctable() {
     // Custom quorum: accept after 4 successful streaming values have arrived
     // (from any node, any round).
     let resp =
-        correctable_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, STREAM_METHOD)
+        correctable_call(&cfg.context(), &req, StreamReadMethod)
             .await
             .expect("correctable qfn dispatch")
             .quorum(|vals: &[pb::ReadResponse]| {
@@ -501,7 +510,7 @@ async fn test_rpc_call_cancelled_immediately() {
 
     let ctx = node.context().with_cancel(token);
     let req = pb::ReadRequest { key: "x".into() };
-    let result = rpc_call::<pb::ReadRequest, pb::ReadResponse>(&ctx, &req, READ_METHOD).await;
+    let result = rpc_call(&ctx, &req, pb::StorageReadMethod).await;
 
     assert!(
         matches!(result, Err(quorums::Error::Cancelled)),
@@ -521,7 +530,7 @@ async fn test_quorum_call_cancelled_immediately() {
     let req = pb::ReadRequest {
         key: "cancel_test".into(),
     };
-    let result = quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx, &req, READ_METHOD)
+    let result = quorum_call(&ctx, &req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -555,7 +564,7 @@ async fn test_unicast_cancelled_immediately() {
         key: "k".into(),
         value: "v".into(),
     };
-    let result = unicast(&ctx, &req, WRITE_METHOD).await;
+    let result = unicast(&ctx, &req, pb::StorageWriteMethod).await;
 
     assert!(
         matches!(result, Err(quorums::Error::Cancelled)),
@@ -601,7 +610,7 @@ async fn test_with_timeout_deadline() {
         .with_timeout(std::time::Duration::from_millis(150));
 
     let req = pb::ReadRequest { key: "x".into() };
-    let result = quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx, &req, READ_METHOD)
+    let result = quorum_call(&ctx, &req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -633,10 +642,10 @@ async fn test_interceptor_logging_on_quorum_call() {
     });
 
     let req = pb::ReadRequest { key: "ilog".into() };
-    let resp = quorum_call::<pb::ReadRequest, pb::ReadResponse>(
+    let resp = quorum_call(
         &ctx.with_interceptor(i),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("dispatch")
@@ -673,10 +682,10 @@ async fn test_interceptor_abort_on_rpc_call() {
     });
 
     let req = pb::ReadRequest { key: "k".into() };
-    let result = rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    let result = rpc_call(
         &node.context().with_interceptor(reject),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await;
 
@@ -723,10 +732,10 @@ async fn test_interceptor_chain_order() {
     let req = pb::ReadRequest {
         key: "order".into(),
     };
-    quorum_call::<pb::ReadRequest, pb::ReadResponse>(
+    quorum_call(
         &ctx.with_interceptor(first).with_interceptor(second),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("dispatch")
@@ -759,7 +768,7 @@ async fn test_interceptor_sees_node_ids() {
     });
 
     let req = pb::ReadRequest { key: "nids".into() };
-    quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx.with_interceptor(i), &req, READ_METHOD)
+    quorum_call(&ctx.with_interceptor(i), &req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -823,7 +832,7 @@ async fn node_ids_seen(ctx: quorums::ConfigContext, req: &pb::ReadRequest) -> Ve
             Ok(())
         }
     });
-    quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx.with_interceptor(i), req, READ_METHOD)
+    quorum_call(&ctx.with_interceptor(i), req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -866,7 +875,7 @@ async fn test_view_without_nodes() {
     // Quorum calls on the 2-node view should succeed (majority = 2/2).
     let req = pb::ReadRequest { key: "wo".into() };
     let resp =
-        quorum_call::<pb::ReadRequest, pb::ReadResponse>(&two_node.context(), &req, READ_METHOD)
+        quorum_call(&two_node.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .all() // require all 2 nodes — stronger check
@@ -972,7 +981,7 @@ async fn test_manager_with_new_nodes() {
     // The new config includes all 3 nodes; quorum call should succeed.
     let req = pb::ReadRequest { key: "wnn".into() };
     let resp =
-        quorum_call::<pb::ReadRequest, pb::ReadResponse>(&extended.context(), &req, READ_METHOD)
+        quorum_call(&extended.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .majority()
@@ -1003,7 +1012,7 @@ async fn test_manager_remove_node() {
 
     // Can still do a quorum call through the original config.
     let req = pb::ReadRequest { key: "rn".into() };
-    let resp = quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+    let resp = quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -1289,7 +1298,7 @@ async fn test_ordered_quorum_call_majority() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .majority()
@@ -1308,7 +1317,7 @@ async fn test_ordered_quorum_call_all() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .all()
@@ -1329,7 +1338,7 @@ async fn test_ordered_quorum_call_threshold_returns_lowest_position() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .all() // wait for all 3, then return position-0 value
@@ -1353,7 +1362,7 @@ async fn test_ordered_quorum_call_quorum_fn_accepts_on_position_0() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .quorum(|slots: &[Option<pb::ReadResponse>]| slots[0].clone())
@@ -1375,7 +1384,7 @@ async fn test_ordered_quorum_call_quorum_fn_sees_positions() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .quorum(|slots: &[Option<pb::ReadResponse>]| {
@@ -1399,7 +1408,7 @@ async fn test_ordered_quorum_call_quorum_fn_requires_majority_of_slots() {
     };
 
     let resp =
-        ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, READ_METHOD)
+        ordered_quorum_call(&cfg.context(), &req, pb::StorageReadMethod)
             .await
             .expect("dispatch")
             .quorum(|slots: &[Option<pb::ReadResponse>]| {
@@ -1430,7 +1439,7 @@ async fn test_ordered_quorum_call_cancelled() {
     let req = pb::ReadRequest {
         key: "oqc_cancel".into(),
     };
-    let result = ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(&ctx, &req, READ_METHOD)
+    let result = ordered_quorum_call(&ctx, &req, pb::StorageReadMethod)
         .await
         .expect("dispatch")
         .majority()
@@ -1460,10 +1469,10 @@ async fn test_ordered_quorum_call_interceptor() {
     let req = pb::ReadRequest {
         key: "oqc_int".into(),
     };
-    ordered_quorum_call::<pb::ReadRequest, pb::ReadResponse>(
+    ordered_quorum_call(
         &cfg.context().with_interceptor(i),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("dispatch")
@@ -1535,7 +1544,7 @@ async fn test_server_interceptor_runs() {
 
     // Send 3 requests; counter must reach at least 3.
     for _ in 0..3 {
-        rpc_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.nodes()[0].context(), &req, READ_METHOD)
+        rpc_call(&cfg.nodes()[0].context(), &req, pb::StorageReadMethod)
             .await
             .expect("rpc");
     }
@@ -1564,7 +1573,7 @@ async fn test_server_interceptor_rejects() {
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
     let req = pb::ReadRequest { key: "x".into() };
     let result =
-        rpc_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.nodes()[0].context(), &req, READ_METHOD)
+        rpc_call(&cfg.nodes()[0].context(), &req, pb::StorageReadMethod)
             .await;
 
     assert!(
@@ -1598,7 +1607,7 @@ async fn test_server_interceptor_has_peer_addr() {
     let mut mgr = Manager::new();
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
     let req = pb::ReadRequest { key: "pk".into() };
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.nodes()[0].context(), &req, READ_METHOD)
+    rpc_call(&cfg.nodes()[0].context(), &req, pb::StorageReadMethod)
         .await
         .expect("rpc");
 
@@ -1643,7 +1652,7 @@ async fn test_server_interceptor_chain_runs_in_order() {
     let mut mgr = Manager::new();
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
     let req = pb::ReadRequest { key: "cl".into() };
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.nodes()[0].context(), &req, READ_METHOD)
+    rpc_call(&cfg.nodes()[0].context(), &req, pb::StorageReadMethod)
         .await
         .expect("rpc");
 
@@ -1700,13 +1709,13 @@ async fn test_metadata_forwarded_rpc_call() {
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
     let req = pb::ReadRequest { key: "x".into() };
 
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    rpc_call(
         &cfg.nodes()[0]
             .context()
             .with_metadata("authorization", "Bearer token123")
             .with_metadata("x-request-id", "req-42"),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("rpc");
@@ -1740,13 +1749,13 @@ async fn test_metadata_forwarded_quorum_call() {
     let single_cfg = mgr2.add_node_list(&[&addr.to_string()]).expect("add node");
     let req = pb::ReadRequest { key: "x".into() };
 
-    quorum_call::<pb::ReadRequest, pb::ReadResponse>(
+    quorum_call(
         &single_cfg
             .context()
             .with_metadata("trace-id", "t-001")
             .with_metadata("user-id", "u-99"),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("dispatch")
@@ -1779,13 +1788,13 @@ async fn test_metadata_visible_to_client_interceptor() {
     let req = pb::ReadRequest {
         key: "meta_ci".into(),
     };
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    rpc_call(
         &cfg.nodes()[0]
             .context()
             .with_interceptor(i)
             .with_metadata("x-custom", "hello"),
         &req,
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("rpc");
@@ -1827,12 +1836,12 @@ async fn test_metadata_get_helper() {
 
     let mut mgr = Manager::new();
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    rpc_call(
         &cfg.nodes()[0]
             .context()
             .with_metadata("api-key", "secret-42"),
         &pb::ReadRequest { key: "x".into() },
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("rpc");
@@ -1874,10 +1883,10 @@ async fn test_metadata_empty_when_none_set() {
 
     let mut mgr = Manager::new();
     let cfg = mgr.add_node_list(&[&addr.to_string()]).expect("add node");
-    rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    rpc_call(
         &cfg.nodes()[0].context(),
         &pb::ReadRequest { key: "x".into() },
-        READ_METHOD,
+        pb::StorageReadMethod,
     )
     .await
     .expect("rpc");
@@ -1908,7 +1917,7 @@ async fn test_correctable_next_drains_to_none() {
     };
 
     let mut c =
-        correctable_call::<pb::ReadRequest, pb::ReadResponse>(&cfg.context(), &req, STREAM_METHOD)
+        correctable_call(&cfg.context(), &req, StreamReadMethod)
             .await
             .expect("dispatch");
 
@@ -1961,10 +1970,10 @@ async fn test_correctable_next_cancelled() {
         token2.cancel();
     });
 
-    let mut c = correctable_call::<pb::ReadRequest, pb::ReadResponse>(
+    let mut c = correctable_call(
         &cfg.context().with_cancel(token),
         &req,
-        STREAM_METHOD,
+        StreamReadMethod,
     )
     .await
     .expect("dispatch");
@@ -1987,10 +1996,10 @@ async fn test_correctable_next_already_cancelled() {
     let token = CancellationToken::new();
     token.cancel(); // cancelled before the call
 
-    let mut c = correctable_call::<pb::ReadRequest, pb::ReadResponse>(
+    let mut c = correctable_call(
         &cfg.context().with_cancel(token),
         &req,
-        STREAM_METHOD,
+        StreamReadMethod,
     )
     .await
     .expect("dispatch");

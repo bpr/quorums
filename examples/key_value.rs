@@ -166,12 +166,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = cfg.nodes()[0].clone();
     println!("\n=== rpc_call: read from node {} only ===", node.id());
     let ctx = node.context().with_interceptor(log.clone());
-    let resp = quorums::call_types::rpc_call::<pb::ReadRequest, pb::ReadResponse>(
+    let resp = quorums::call_types::rpc_call(
         &ctx,
         &pb::ReadRequest {
             key: "colour".into(),
         },
-        "/storage.Storage/Read",
+        pb::StorageReadMethod,
     )
     .await?;
     println!("  ok={}, value={:?}", resp.ok, resp.value);

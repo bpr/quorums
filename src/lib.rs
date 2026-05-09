@@ -16,6 +16,7 @@ pub mod config;
 pub mod correctable;
 pub mod health;
 pub mod interceptor;
+pub mod method;
 pub mod node;
 pub mod ordered_responses;
 pub mod server;
@@ -24,6 +25,10 @@ pub mod server;
 
 pub use call_types::{
     correctable_call, multicast, ordered_quorum_call, quorum_call, rpc_call, unicast,
+};
+pub use method::{
+    CorrectableMethod, MulticastMethod, OrderedQuorumCallMethod, QuorumCallMethod, RpcCallMethod,
+    UnicastMethod,
 };
 pub use config::{ConfigContext, Configuration};
 pub use correctable::Correctable;

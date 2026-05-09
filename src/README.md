@@ -171,16 +171,19 @@ impl NodeContext {
 
 ## Call types (`call_types.rs`)
 
-All functions are fully generic — no `dyn Trait` in the public API.
+All functions are fully generic — no `dyn Trait` in the public API.  The
+third argument is a **typed method handle** (see
+[Typed method handles](#typed-method-handles) below) that carries the method
+path and request/response types as compile-time constants.
 
 ### `rpc_call` — single-node two-way
 
 ```rust
-pub async fn rpc_call<Req, Resp>(
+pub async fn rpc_call<M: RpcCallMethod>(
     ctx: &NodeContext,
-    req: &Req,
-    method: &str,
-) -> Result<Resp, Error>
+    req: &M::Req,
+    _m: M,
+) -> Result<M::Resp, Error>
 ```
 
 Sends a request to one node and awaits its response.
@@ -188,10 +191,10 @@ Sends a request to one node and awaits its response.
 ### `unicast` — single-node one-way
 
 ```rust
-pub async fn unicast<Req>(
+pub async fn unicast<M: UnicastMethod>(
     ctx: &NodeContext,
-    req: &Req,
-    method: &str,
+    req: &M::Req,
+    _m: M,
 ) -> Result<(), Error>
 ```
 
@@ -201,10 +204,10 @@ send queue (not when the server processes them).
 ### `multicast` — fan-out one-way
 
 ```rust
-pub async fn multicast<Req>(
+pub async fn multicast<M: MulticastMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
+    req: &M::Req,
+    _m: M,
 ) -> Result<(), Error>
 ```
 
@@ -214,24 +217,24 @@ collected.
 ### `quorum_call` — fan-out two-way
 
 ```rust
-pub async fn quorum_call<Req, Resp>(
+pub async fn quorum_call<M: QuorumCallMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<Responses<Resp>, Error>
+    req: &M::Req,
+    _m: M,
+) -> Result<Responses<M::Resp>, Error>
 ```
 
-Fans out to all nodes and returns a [`Responses<Resp>`](#responsest) handle.
+Fans out to all nodes and returns a [`Responses<M::Resp>`](#responsest) handle.
 The caller drives aggregation with a terminal method.
 
 ### `ordered_quorum_call` — fan-out two-way with position tags
 
 ```rust
-pub async fn ordered_quorum_call<Req, Resp>(
+pub async fn ordered_quorum_call<M: OrderedQuorumCallMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<OrderedResponses<Resp>, Error>
+    req: &M::Req,
+    _m: M,
+) -> Result<OrderedResponses<M::Resp>, Error>
 ```
 
 Like `quorum_call`, but each response is tagged with the node's **position**
@@ -241,19 +244,23 @@ the lowest-position node; `.quorum(f)` receives a `&[Option<Resp>]` slice.
 ### `correctable_call` — fan-out streaming
 
 ```rust
-pub async fn correctable_call<Req, Resp>(
+pub async fn correctable_call<M: CorrectableMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<Correctable<Resp>, Error>
+    req: &M::Req,
+    _m: M,
+) -> Result<Correctable<M::Resp>, Error>
 ```
 
 Each node can send **multiple** responses before signalling completion.
-Returns a [`Correctable<Resp>`](#correctablet) handle.
+Returns a [`Correctable<M::Resp>`](#correctablet) handle.
 
 ---
 
 ## Response handles
+
+All three response handle types are `#[must_use]`.  The compiler emits a
+warning if the handle is dropped without calling a terminal method — which
+would silently discard a fan-out that is already in flight.
 
 ### `Responses<T>`
 
@@ -304,6 +311,99 @@ impl<T> Correctable<T> {
 
 `threshold` counts **distinct nodes** that have sent at least one successful
 response, then returns the most recently received successful value.
+
+`Correctable<T>` also implements `futures::Stream<Item = Result<NodeResponse<T>, Error>>`,
+giving access to the full `StreamExt` combinator ecosystem
+(`take_while`, `for_each`, `collect`, etc.) without needing the manual `next()` loop:
+
+```rust
+use futures::StreamExt as _;
+
+let mut stream = correctable_call(&ctx, &req, MyMethod).await?;
+while let Some(item) = stream.next().await {
+    println!("{:?}", item?);
+}
+```
+
+---
+
+## Typed method handles
+
+The call-type functions take `_m: M` where `M` is a **typed method handle** —
+a zero-sized struct implementing one of six marker traits in `quorums::method`:
+
+| Trait | Used by |
+|-------|---------|
+| `RpcCallMethod` | `rpc_call` |
+| `UnicastMethod` | `unicast` |
+| `MulticastMethod` | `multicast` |
+| `QuorumCallMethod` | `quorum_call` |
+| `OrderedQuorumCallMethod` | `ordered_quorum_call` |
+| `CorrectableMethod` | `correctable_call` |
+
+Each trait has three associated items:
+
+```rust
+pub trait QuorumCallMethod {
+    type Req:  prost::Message;
+    type Resp: prost::Message + Default + Send + 'static;
+    const PATH: &'static str;   // full gRPC method path, e.g. "/storage.Storage/Read"
+}
+```
+
+Because `Req` and `Resp` are associated types on the handle, the compiler
+infers them from the handle you pass — no turbofish, no magic strings:
+
+```rust
+// Define a handle (once, usually in generated code):
+#[derive(Clone, Copy)]
+pub struct StorageReadMethod;
+
+impl quorums::QuorumCallMethod for StorageReadMethod {
+    type Req  = ReadRequest;
+    type Resp = ReadResponse;
+    const PATH: &'static str = "/storage.Storage/Read";
+}
+
+// Use it — types are inferred, path is a compile-time constant:
+let responses = quorum_call(&ctx, &req, StorageReadMethod).await?;
+//                                        ^^^^^^^^^^^^^^^^
+//                                        zero bytes at runtime
+```
+
+Pass the handle by value (it has no data — it is zero bytes at runtime and
+is immediately dropped).  The `_m` parameter name signals this convention.
+
+**Handle reuse across call types.**  `quorums-build` implements multiple traits
+on each handle to allow the same method to be called in more than one mode:
+
+- A `Multicast`-annotated method also implements `UnicastMethod` (same wire
+  path, one node instead of all).
+- A `QuorumCall`-annotated method also implements `OrderedQuorumCallMethod` and
+  `RpcCallMethod` — you can call `rpc_call(..., StorageReadMethod)` on a
+  `QuorumCall` handle to read from a single node directly.
+
+**What `quorums-build` generates.**  For each annotated method, the generator
+emits a handle struct at file level (same scope as prost message types) plus a
+convenience function in the `{service}_client` module:
+
+```rust
+// file level — same scope as ReadRequest / ReadResponse
+#[derive(Clone, Copy)]
+pub struct StorageReadMethod;
+impl ::quorums::QuorumCallMethod      for StorageReadMethod { … }
+impl ::quorums::OrderedQuorumCallMethod for StorageReadMethod { … }
+impl ::quorums::RpcCallMethod          for StorageReadMethod { … }
+
+pub mod storage_client {
+    pub async fn read(
+        ctx: &::quorums::config::ConfigContext,
+        req: &super::ReadRequest,
+    ) -> Result<::quorums::Responses<super::ReadResponse>, ::quorums::Error> {
+        ::quorums::call_types::quorum_call(ctx, req, super::StorageReadMethod).await
+    }
+}
+```
 
 ---
 

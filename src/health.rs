@@ -4,6 +4,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::call_types::rpc_call;
+use crate::method::RpcCallMethod;
 use crate::node::Node;
 use crate::proto::gorums::{HealthCheckRequest, HealthCheckResponse};
 
@@ -11,6 +12,15 @@ use crate::proto::gorums::{HealthCheckRequest, HealthCheckResponse};
 ///
 /// Automatically registered on every [`Server`][crate::server::Server].
 pub(crate) const HEALTH_METHOD: &str = "/_gorums/health";
+
+/// Typed method handle for the built-in health probe.
+pub(crate) struct HealthMethod;
+
+impl RpcCallMethod for HealthMethod {
+    type Req = HealthCheckRequest;
+    type Resp = HealthCheckResponse;
+    const PATH: &'static str = HEALTH_METHOD;
+}
 
 // ── HealthStatus ──────────────────────────────────────────────────────────────
 
@@ -135,11 +145,7 @@ pub fn check_node(node: Node, config: HealthConfig) -> NodeHealthChecker {
             let ctx = node.context();
             let result = tokio::time::timeout(
                 config.timeout,
-                rpc_call::<HealthCheckRequest, HealthCheckResponse>(
-                    &ctx,
-                    &HealthCheckRequest {},
-                    HEALTH_METHOD,
-                ),
+                rpc_call(&ctx, &HealthCheckRequest {}, HealthMethod),
             )
             .await;
 

@@ -106,6 +106,94 @@ Server
   .serve(addr)
 ```
 
+## Rust-specific design patterns
+
+The library uses several Rust type-system features to move common mistakes from
+runtime to compile time.
+
+### Typed method handles
+
+Call-type functions take a **zero-sized handle** as their last argument rather
+than a plain `&str` method path:
+
+```rust
+// Old (hypothetical):  quorum_call(&ctx, &req, "/storage.Storage/Read")
+// Actual API:
+let resp = quorum_call(&ctx, &req, StorageReadMethod).await?;
+```
+
+`StorageReadMethod` is a zero-sized struct implementing `QuorumCallMethod`:
+
+```rust
+#[derive(Clone, Copy)]
+pub struct StorageReadMethod;
+
+impl quorums::QuorumCallMethod for StorageReadMethod {
+    type Req  = ReadRequest;
+    type Resp = ReadResponse;
+    const PATH: &'static str = "/storage.Storage/Read";
+}
+```
+
+Benefits:
+- **No turbofish** — `Req` and `Resp` are associated types, inferred from the
+  handle.
+- **No magic strings** — the path is a compile-time constant on the trait;
+  a typo is a type error, not a runtime `NOT_FOUND`.
+- **Zero runtime cost** — the handle is dropped immediately; it carries no
+  data.
+
+`quorums-build` generates these structs automatically.  Define them manually
+only when not using the code generator.
+
+### `#[must_use]` on response handles
+
+`Responses<T>`, `OrderedResponses<T>`, and `Correctable<T>` are all marked
+`#[must_use]`.  If you call `quorum_call(…)` and discard the handle without
+calling `.majority()` / `.all()` / etc., the compiler emits a warning.  This
+prevents a silent footgun where the fan-out fires but the caller never waits
+for the results.
+
+### `Correctable<T>: futures::Stream`
+
+`Correctable<T>` implements `futures::Stream<Item = Result<NodeResponse<T>, Error>>`,
+so the entire `StreamExt` combinator ecosystem (`take`, `for_each`, `collect`,
+`filter_map`, …) works out of the box:
+
+```rust
+use futures::StreamExt as _;
+
+correctable_call(&ctx, &req, MyStreamMethod)
+    .await?
+    .take(5)
+    .for_each(|item| async move { println!("{item:?}") })
+    .await;
+```
+
+### Typestate `ServerCtx<S>`
+
+Server handlers receive `ServerCtx<Locked>`.  Calling `ctx.release()` consumes
+it and returns `ServerCtx<Released>`, releasing the per-stream FIFO ordering
+lock at that point.  Both states keep `send()` and `metadata()` available:
+
+```rust
+server.register_streaming_handler("/svc/Stream",
+    |ctx, req: Req| async move {
+        let ctx = ctx.release();   // lock released; next message can dispatch
+        ctx.send(Resp { … })?;     // still safe to send
+        Ok(())
+    });
+```
+
+Calling `release()` twice is a **compile error** (the method consumes `self`).
+Forgetting to release in a streaming handler is safe — the lock is held by an
+`OwnedMutexGuard` inside the struct and is released automatically when `ServerCtx`
+drops.
+
+See [`src/README.md`](src/README.md) for the complete API reference.
+
+---
+
 ## Code generation
 
 `quorums-build` reads `.proto` files and emits:

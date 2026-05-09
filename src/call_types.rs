@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use prost::Message as ProstMessage;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::channel::{OutboundRequest, decode_payload, encode_payload};
@@ -8,6 +7,10 @@ use crate::config::ConfigContext;
 use crate::correctable::Correctable;
 use crate::error::{Error, NodeError, QuorumCallCause, QuorumCallError};
 use crate::interceptor::{self, CallInfo};
+use crate::method::{
+    CorrectableMethod, MulticastMethod, OrderedQuorumCallMethod, QuorumCallMethod, RpcCallMethod,
+    UnicastMethod,
+};
 use crate::node::NodeContext;
 use crate::ordered_responses::{OrderedNodeResponse, OrderedResponses};
 use crate::proto::gorums::Message;
@@ -47,15 +50,15 @@ fn metadata_map(entries: &[(String, String)]) -> HashMap<String, String> {
 /// Interceptors registered on `ctx` run before the request is dispatched.
 /// Returns [`Error::Cancelled`] if the context's token fires before a response
 /// arrives.
-pub async fn rpc_call<Req, Resp>(ctx: &NodeContext, req: &Req, method: &str) -> Result<Resp, Error>
-where
-    Req: ProstMessage,
-    Resp: ProstMessage + Default,
-{
+pub async fn rpc_call<M: RpcCallMethod>(
+    ctx: &NodeContext,
+    req: &M::Req,
+    _m: M,
+) -> Result<M::Resp, Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: vec![ctx.node.id()],
             metadata: ctx.metadata.clone(),
         },
@@ -65,7 +68,7 @@ where
     let ch = ctx.node.channel();
     let seq = ch.next_seq();
     let payload = encode_payload(req);
-    let wire = build_wire_message(seq, method, payload, metadata_map(&ctx.metadata));
+    let wire = build_wire_message(seq, M::PATH, payload, metadata_map(&ctx.metadata));
 
     let (resp_tx, resp_rx) = oneshot::channel();
 
@@ -80,7 +83,7 @@ where
         _ = ctx.cancel.cancelled() => return Err(Error::Cancelled),
         r = resp_rx => r.map_err(|_| Error::NodeClosed)??,
     };
-    Ok(decode_payload::<Resp>(&wire_resp)?)
+    Ok(decode_payload::<M::Resp>(&wire_resp)?)
 }
 
 // ── Unicast: single-node one-way call ────────────────────────────────────────
@@ -88,14 +91,15 @@ where
 /// Send a request to a single node.  No response is expected.
 ///
 /// Interceptors registered on `ctx` run before the request is dispatched.
-pub async fn unicast<Req>(ctx: &NodeContext, req: &Req, method: &str) -> Result<(), Error>
-where
-    Req: ProstMessage,
-{
+pub async fn unicast<M: UnicastMethod>(
+    ctx: &NodeContext,
+    req: &M::Req,
+    _m: M,
+) -> Result<(), Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: vec![ctx.node.id()],
             metadata: ctx.metadata.clone(),
         },
@@ -105,7 +109,7 @@ where
     let ch = ctx.node.channel();
     let seq = ch.next_seq();
     let payload = encode_payload(req);
-    let wire = build_wire_message(seq, method, payload, metadata_map(&ctx.metadata));
+    let wire = build_wire_message(seq, M::PATH, payload, metadata_map(&ctx.metadata));
 
     let (ack_tx, ack_rx) = oneshot::channel();
 
@@ -128,14 +132,15 @@ where
 /// are collected.
 ///
 /// Interceptors registered on `ctx` run once before any node is contacted.
-pub async fn multicast<Req>(ctx: &ConfigContext, req: &Req, method: &str) -> Result<(), Error>
-where
-    Req: ProstMessage,
-{
+pub async fn multicast<M: MulticastMethod>(
+    ctx: &ConfigContext,
+    req: &M::Req,
+    _m: M,
+) -> Result<(), Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: ctx.config.node_ids(),
             metadata: ctx.metadata.clone(),
         },
@@ -153,7 +158,6 @@ where
     for node in nodes {
         let node = node.clone();
         let payload = payload.clone();
-        let method = method.to_string();
         let ack_tx = ack_tx.clone();
         let node_id = node.id();
         let meta = meta.clone();
@@ -162,7 +166,7 @@ where
             let (tx, rx) = oneshot::channel();
             let ch = node.channel();
             let seq = ch.next_seq();
-            let wire = build_wire_message(seq, &method, payload, meta);
+            let wire = build_wire_message(seq, M::PATH, payload, meta);
 
             let result = match ch.enqueue(OutboundRequest {
                 msg: wire,
@@ -221,19 +225,15 @@ where
 ///     .majority()
 ///     .await?;
 /// ```
-pub async fn quorum_call<Req, Resp>(
+pub async fn quorum_call<M: QuorumCallMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<Responses<Resp>, Error>
-where
-    Req: ProstMessage,
-    Resp: ProstMessage + Default + Send + 'static,
-{
+    req: &M::Req,
+    _m: M,
+) -> Result<Responses<M::Resp>, Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: ctx.config.node_ids(),
             metadata: ctx.metadata.clone(),
         },
@@ -245,24 +245,23 @@ where
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
-    let (result_tx, result_rx) = mpsc::channel::<NodeResponse<Resp>>(n);
+    let (result_tx, result_rx) = mpsc::channel::<NodeResponse<M::Resp>>(n);
 
     for node in nodes {
         let node = node.clone();
         let payload = payload.clone();
-        let method = method.to_string();
         let result_tx = result_tx.clone();
         let node_id = node.id();
         let meta = meta.clone();
 
         tokio::spawn(async move {
-            let result = send_twoway(&node, &method, payload, meta).await;
+            let result = send_twoway(&node, M::PATH, payload, meta).await;
             let node_resp = match result {
                 Err(e) => NodeResponse {
                     node_id,
                     result: Err(e),
                 },
-                Ok(wire_msg) => match decode_payload::<Resp>(&wire_msg) {
+                Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
                     Err(e) => NodeResponse {
                         node_id,
                         result: Err(e.into()),
@@ -291,19 +290,15 @@ where
 ///
 /// Interceptors registered on `ctx` run once before any node is contacted.
 /// Returns `Err` immediately if an interceptor rejects the call.
-pub async fn correctable_call<Req, Resp>(
+pub async fn correctable_call<M: CorrectableMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<Correctable<Resp>, Error>
-where
-    Req: ProstMessage,
-    Resp: ProstMessage + Default + Send + 'static,
-{
+    req: &M::Req,
+    _m: M,
+) -> Result<Correctable<M::Resp>, Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: ctx.config.node_ids(),
             metadata: ctx.metadata.clone(),
         },
@@ -315,12 +310,11 @@ where
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
-    let (result_tx, result_rx) = mpsc::unbounded_channel::<NodeResponse<Resp>>();
+    let (result_tx, result_rx) = mpsc::unbounded_channel::<NodeResponse<M::Resp>>();
 
     for node in nodes {
         let node = node.clone();
         let payload = payload.clone();
-        let method = method.to_string();
         let result_tx = result_tx.clone();
         let node_id = node.id();
         let meta = meta.clone();
@@ -328,7 +322,7 @@ where
         tokio::spawn(async move {
             let ch = node.channel();
             let seq = ch.next_seq();
-            let wire = build_wire_message(seq, &method, payload, meta);
+            let wire = build_wire_message(seq, M::PATH, payload, meta);
 
             let mut stream_rx = ch.register_stream(seq);
 
@@ -353,7 +347,7 @@ where
                         node_id,
                         result: Err(e),
                     },
-                    Ok(msg) => match decode_payload::<Resp>(&msg) {
+                    Ok(msg) => match decode_payload::<M::Resp>(&msg) {
                         Err(e) => NodeResponse {
                             node_id,
                             result: Err(e.into()),
@@ -399,19 +393,15 @@ where
 ///     .quorum(|slots| slots[0].clone())
 ///     .await?;
 /// ```
-pub async fn ordered_quorum_call<Req, Resp>(
+pub async fn ordered_quorum_call<M: OrderedQuorumCallMethod>(
     ctx: &ConfigContext,
-    req: &Req,
-    method: &str,
-) -> Result<OrderedResponses<Resp>, Error>
-where
-    Req: ProstMessage,
-    Resp: ProstMessage + Default + Send + 'static,
-{
+    req: &M::Req,
+    _m: M,
+) -> Result<OrderedResponses<M::Resp>, Error> {
     interceptor::run(
         &ctx.interceptors,
         CallInfo {
-            method: method.to_string(),
+            method: M::PATH.to_string(),
             node_ids: ctx.config.node_ids(),
             metadata: ctx.metadata.clone(),
         },
@@ -423,25 +413,24 @@ where
     let payload = encode_payload(req);
     let meta = metadata_map(&ctx.metadata);
 
-    let (result_tx, result_rx) = mpsc::channel::<OrderedNodeResponse<Resp>>(n);
+    let (result_tx, result_rx) = mpsc::channel::<OrderedNodeResponse<M::Resp>>(n);
 
     for (position, node) in nodes.iter().enumerate() {
         let node = node.clone();
         let payload = payload.clone();
-        let method = method.to_string();
         let result_tx = result_tx.clone();
         let node_id = node.id();
         let meta = meta.clone();
 
         tokio::spawn(async move {
-            let result = send_twoway(&node, &method, payload, meta).await;
+            let result = send_twoway(&node, M::PATH, payload, meta).await;
             let node_resp = match result {
                 Err(e) => OrderedNodeResponse {
                     position,
                     node_id,
                     result: Err(e),
                 },
-                Ok(wire_msg) => match decode_payload::<Resp>(&wire_msg) {
+                Ok(wire_msg) => match decode_payload::<M::Resp>(&wire_msg) {
                     Err(e) => OrderedNodeResponse {
                         position,
                         node_id,
