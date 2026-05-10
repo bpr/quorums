@@ -45,7 +45,7 @@ cargo clippy         # lint
 cargo fmt            # format
 ```
 
-## Running the example
+## Running the examples
 
 The `key_value` example starts three in-process storage nodes and demonstrates
 multicast writes, quorum reads, single-node RPCs, metadata, and cancellation.
@@ -72,6 +72,23 @@ Connected to 3 nodes.
 …
 Done.
 ```
+
+The `epaxos` example implements a full EPaxos cluster in-process, demonstrating
+all phases of the protocol:
+
+```bash
+cargo run --example epaxos
+cargo test --example epaxos   # 9 tests covering all paths
+```
+
+Covered by the example:
+
+| Feature | Detail |
+|---------|--------|
+| Normal path | PreAccept fast path (all agree) and slow path (conflict → Accept) |
+| Recovery | Prepare → COMMITTED / ACCEPTED / TryPreAccept / slow-path Accept |
+| SCC execution | Tarjan's algorithm resolves dependency cycles; seq-ordered within cycles |
+| Thrifty mode | `propose(cmds, peers, thrifty: true)` sends Commit only to ⌊N/2⌋ quorum peers; non-participants catch up lazily |
 
 ## Architecture overview
 

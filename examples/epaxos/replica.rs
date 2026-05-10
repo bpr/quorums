@@ -563,16 +563,21 @@ impl Replica {
 
     /// Propose a batch of commands.
     ///
-    /// `peers` is the N-1 other replicas (PreAccept and Accept fan-out).
-    /// `_all` is reserved for future use (e.g., thrifty-mode Commit fan-out
-    /// to non-participant replicas).
+    /// `peers` is the N-1 other replicas used for PreAccept and Accept fan-out.
+    ///
+    /// When `thrifty` is `true` the Commit message is sent only to the minimum
+    /// quorum of peers (⌊N/2⌋) rather than all N-1.  Those peers already hold
+    /// PreAccept or Accept state, so no additional round-trip is needed.
+    /// Non-participant replicas learn about the commit lazily (e.g., via a
+    /// future recovery Prepare or a read-repair).  When `thrifty` is `false`
+    /// (the default) Commit is broadcast to all peers.
     ///
     /// Returns [`CommitInfo`] describing how the proposal was committed.
     pub async fn propose(
         &self,
         cmds: Vec<Command>,
         peers: &Configuration,
-        _all: &Configuration,
+        thrifty: bool,
     ) -> Result<CommitInfo, quorums::Error> {
         // Lock, compute attrs, unlock — no awaits while lock is held.
         let (my_id, slot, orig_seq, orig_deps, ballot) = {
@@ -585,6 +590,18 @@ impl Replica {
         let n = peers.size() + 1; // total replicas = peers + self
         let fast_quorum = n - 1;
         let slow_quorum_peers = n / 2;
+
+        // Thrifty: commit only to the ⌊N/2⌋ peers that already have state.
+        // Non-thrifty: commit to all N-1 peers.
+        let commit_peers = if thrifty {
+            let ids: Vec<u32> = peers.nodes()[..slow_quorum_peers]
+                .iter()
+                .map(|node| node.id())
+                .collect();
+            peers.sub_config(&ids)
+        } else {
+            peers.clone()
+        };
 
         // ── Phase 1: PreAccept fan-out ────────────────────────────────────────
         let req = PreAcceptRequest {
@@ -667,6 +684,8 @@ impl Replica {
 
         // ── Phase 3: Commit ───────────────────────────────────────────────────
         // Commit on the leader synchronously (no network hop), then notify peers.
+        // In thrifty mode only the quorum subset receives Commit; the rest learn
+        // lazily (e.g., via recovery or a future read-repair).
         self.commit_local(my_id as usize, slot, cmds.clone(), final_seq, final_deps.clone());
 
         let commit_req = CommitRequest {
@@ -677,7 +696,7 @@ impl Replica {
             seq: final_seq,
             deps: final_deps.clone(),
         };
-        e_paxos_client::commit(&peers.context(), &commit_req).await?;
+        e_paxos_client::commit(&commit_peers.context(), &commit_req).await?;
 
         Ok(CommitInfo { replica: my_id as usize, slot, seq: final_seq, deps: final_deps, fast_path })
     }

@@ -31,12 +31,17 @@
 //! - Both fast path (no conflicts) and slow path (injected conflict) are
 //!   demonstrated.
 //! - Multiple leaders (replicas 0 and 1) proposing concurrently.
+//! - **Recovery** — Prepare → analyze COMMITTED / ACCEPTED / PREACCEPTED
+//!   replies → TryPreAccept (fast) or Accept+Commit (slow).
+//! - **SCC-based execution ordering** — Tarjan's algorithm resolves dependency
+//!   cycles; within a cycle commands execute in ascending `seq` order.
+//! - **Thrifty mode** — `propose(cmds, peers, thrifty: true)` sends Commit
+//!   only to the ⌊N/2⌋ quorum peers that already hold PreAccept/Accept state,
+//!   reducing network fan-out at the cost of lazy catch-up for non-participants.
 //!
 //! # What is omitted
 //!
-//! - Recovery (explicit prepare / Paxos-Accept recovery after crash).
-//! - Execution ordering via strongly-connected component decomposition.
-//! - Thrifty mode, leader-local thresholding, or batching.
+//! - Leader-local thresholding and batching.
 
 mod replica;
 
@@ -154,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (key, val) in &commands {
         let cmds = vec![put(*key, *val)];
-        let info = leader.propose(cmds, peers, &_all_cfg).await?;
+        let info = leader.propose(cmds, peers, false).await?;
         println!(
             "  committed slot={} seq={} fast_path={} key={}",
             info.slot, info.seq, info.fast_path, key
@@ -184,13 +189,13 @@ mod tests {
     #[tokio::test]
     async fn test_fast_path() {
         const BASE: u16 = 19030;
-        let (replicas, _mgr, all_cfg, peers_cfgs) = setup(3, BASE).await;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
 
         let leader = &replicas[0];
         let peers = &peers_cfgs[0];
 
         let cmds = vec![put("hello", "world")];
-        let info = leader.propose(cmds, peers, &all_cfg).await.unwrap();
+        let info = leader.propose(cmds, peers, false).await.unwrap();
 
         assert!(
             info.fast_path,
@@ -215,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn test_sequential_commands() {
         const BASE: u16 = 19033;
-        let (replicas, _mgr, all_cfg, peers_cfgs) = setup(3, BASE).await;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
 
         let leader = &replicas[0];
         let peers = &peers_cfgs[0];
@@ -223,7 +228,7 @@ mod tests {
         let keys: Vec<String> = (0..5).map(|i| format!("k{i}")).collect();
         for key in &keys {
             let cmds = vec![put(key.as_str(), "val")];
-            let info = leader.propose(cmds, peers, &all_cfg).await.unwrap();
+            let info = leader.propose(cmds, peers, false).await.unwrap();
             assert!(info.slot >= 0, "slot should be non-negative");
         }
 
@@ -241,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn test_slow_path() {
         const BASE: u16 = 19036;
-        let (replicas, _mgr, all_cfg, peers_cfgs) = setup(3, BASE).await;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
 
         let leader = &replicas[0];
         let peers = &peers_cfgs[0];
@@ -261,7 +266,7 @@ mod tests {
         replicas[1].inject_conflict("x", 5, 1, 99);
 
         let cmds = vec![put("x", "slow")];
-        let info = leader.propose(cmds, peers, &all_cfg).await.unwrap();
+        let info = leader.propose(cmds, peers, false).await.unwrap();
 
         assert!(
             !info.fast_path,
@@ -421,27 +426,84 @@ mod tests {
         );
     }
 
+    /// Thrifty mode: Commit is sent only to the slow-quorum subset of peers
+    /// (⌊N/2⌋ = 1 for N=3) rather than all N-1=2 peers.
+    ///
+    /// After the commit the leader (replica 0) and one quorum peer have
+    /// COMMITTED state and execute the command immediately.  The other peer
+    /// (the one outside the quorum) remains at PREACCEPTED and has NOT yet
+    /// executed — its store should be empty immediately after the commit.
+    #[tokio::test]
+    async fn test_thrifty_commit() {
+        const BASE: u16 = 19048;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
+
+        let leader = &replicas[0];
+        let peers = &peers_cfgs[0]; // peers of replica 0: nodes 1 and 2 (IDs 2, 3)
+
+        let cmds = vec![put("thrifty_key", "thrifty_val")];
+        let info = leader.propose(cmds, peers, true).await.unwrap();
+
+        assert!(
+            info.fast_path,
+            "expected fast path in thrifty test: seq={} deps={:?}",
+            info.seq,
+            info.deps
+        );
+
+        // Give the quorum peer time to receive and apply its Commit, and give
+        // the non-quorum peer time to NOT receive anything.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Leader (committed locally) must have the key.
+        assert_eq!(
+            leader.get_store_value("thrifty_key").as_deref(),
+            Some("thrifty_val"),
+            "leader missing 'thrifty_key'"
+        );
+
+        // Exactly one of the two peers received Commit (the first in the config
+        // order, which is peers_cfgs[0].nodes()[0] = the peer with the lowest
+        // node ID among replica 0's peers).  The other peer did NOT receive a
+        // Commit and is still at PREACCEPTED → its store is empty.
+        let peer_vals: Vec<Option<String>> = replicas[1..].iter()
+            .map(|r| r.get_store_value("thrifty_key"))
+            .collect();
+
+        let committed_peers = peer_vals.iter().filter(|v| v.is_some()).count();
+        let not_committed_peers = peer_vals.iter().filter(|v| v.is_none()).count();
+
+        assert_eq!(
+            committed_peers, 1,
+            "thrifty mode must commit to exactly 1 peer (slow_quorum_peers=1 for N=3); \
+             got {committed_peers} peers with the key: {peer_vals:?}"
+        );
+        assert_eq!(
+            not_committed_peers, 1,
+            "thrifty mode must leave exactly 1 peer without the committed value; \
+             got {not_committed_peers}: {peer_vals:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_multiple_leaders() {
         const BASE: u16 = 19039;
-        let (replicas, _mgr, all_cfg, peers_cfgs) = setup(3, BASE).await;
+        let (replicas, _mgr, _all_cfg, peers_cfgs) = setup(3, BASE).await;
 
         // Replica 0 and replica 1 propose concurrently.
         let leader0 = replicas[0].clone();
         let leader1 = replicas[1].clone();
         let peers0 = peers_cfgs[0].clone();
         let peers1 = peers_cfgs[1].clone();
-        let all0 = all_cfg.clone();
-        let all1 = all_cfg.clone();
 
         let h0 = tokio::spawn(async move {
             let cmds = vec![put("leader0_key", "v0")];
-            leader0.propose(cmds, &peers0, &all0).await
+            leader0.propose(cmds, &peers0, false).await
         });
 
         let h1 = tokio::spawn(async move {
             let cmds = vec![put("leader1_key", "v1")];
-            leader1.propose(cmds, &peers1, &all1).await
+            leader1.propose(cmds, &peers1, false).await
         });
 
         let (r0, r1) = tokio::join!(h0, h1);
